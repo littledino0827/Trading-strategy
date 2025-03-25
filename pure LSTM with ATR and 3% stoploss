@@ -12,8 +12,7 @@ class LSTMTradingWithVolume(QCAlgorithm):
         self.SetEndDate(2020, 1, 1)
         self.SetCash(100000)
         
-        self.symbol = self.AddEquity("SPY", Resolution.Daily).Symbol
-        
+        self.symbol = self.AddEquity("MSFT", Resolution.Daily).Symbol
         self.lookback = 60
         self.train_interval = 20
         
@@ -22,14 +21,36 @@ class LSTMTradingWithVolume(QCAlgorithm):
         self.model = None
         self.days = 0
 
-        # Stop-loss related
         self.atr = self.ATR(self.symbol, 14, MovingAverageType.Wilders, Resolution.Daily)
         self.stopLossLevel = None
         self.currentDirection = None
 
+        self.dailyStartValue = None
+        self.currentDate = None
+        self.dailyLossThreshold = 0.03
+        self.tradingHaltedToday = False
+
     def OnData(self, data):
         if not data.ContainsKey(self.symbol) or data[self.symbol] is None or not data[self.symbol].Price:
             return
+
+        if self.currentDate != self.Time.date():
+            self.currentDate = self.Time.date()
+            self.dailyStartValue = self.Portfolio.TotalPortfolioValue
+            self.tradingHaltedToday = False
+
+        if self.tradingHaltedToday:
+            return
+
+        if self.dailyStartValue:
+            dailyReturn = (self.Portfolio.TotalPortfolioValue - self.dailyStartValue) / self.dailyStartValue
+            if dailyReturn < -self.dailyLossThreshold:
+                self.Liquidate()
+                self.Debug(f"Daily loss exceeded 3%: {dailyReturn:.2%}. Liquidating and halting trades for today.")
+                self.stopLossLevel = None
+                self.currentDirection = None
+                self.tradingHaltedToday = True
+                return
 
         bar = data[self.symbol]
         price = bar.Close
@@ -44,12 +65,10 @@ class LSTMTradingWithVolume(QCAlgorithm):
         self.volumeHistory.append(volume)
         self.days += 1
 
-        # Clean up history
         if len(self.priceHistory) > self.lookback + 100:
             self.priceHistory = self.priceHistory[-(self.lookback + 100):]
             self.volumeHistory = self.volumeHistory[-(self.lookback + 100):]
 
-        # Stop-loss check
         if self.Portfolio[self.symbol].Invested and self.stopLossLevel is not None:
             if self.currentDirection == "long" and price < self.stopLossLevel:
                 self.Liquidate(self.symbol)
