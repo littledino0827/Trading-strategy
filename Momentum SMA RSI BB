@@ -1,0 +1,76 @@
+from AlgorithmImports import *
+
+class MomentumTrendStrategy(QCAlgorithm):
+
+    def Initialize(self):
+        self.SetStartDate(2019, 1, 1)
+        self.SetEndDate(2020, 1, 1)
+        self.SetCash(1000000)
+
+        # Add AMD and JNJ (daily resolution)
+        self.symbols = []
+        self.symbols.append(self.AddEquity("AMD", Resolution.Daily).Symbol)
+        self.symbols.append(self.AddEquity("JNJ", Resolution.Daily).Symbol)
+
+        # Dictionary to hold indicators for each stock
+        self.indicators = {}
+        for symbol in self.symbols:
+            self.indicators[symbol] = {
+                "sma50": self.SMA(symbol, 50, Resolution.Daily),
+                "sma200": self.SMA(symbol, 200, Resolution.Daily),
+                "rsi": self.RSI(symbol, 14, MovingAverageType.Simple, Resolution.Daily),
+                "bb": self.BB(symbol, 15 if symbol == "AMD" else 25, 2.5 if symbol == "AMD" else 2.0, Resolution.Daily)
+            }
+
+        # Warm up indicators
+        self.SetWarmUp(200)
+
+    def OnData(self, data):
+        if self.IsWarmingUp:
+            return
+
+        for symbol in self.symbols:
+            # Ensure the indicators are ready
+            ind = self.indicators[symbol]
+            if not all([ind["sma50"].IsReady, ind["sma200"].IsReady, ind["rsi"].IsReady, ind["bb"].IsReady]):
+                continue
+
+            # Get the current price from the security object instead of the data slice
+            price = self.Securities[symbol].Price
+            sma50 = ind["sma50"].Current.Value
+            sma200 = ind["sma200"].Current.Value
+            rsi = ind["rsi"].Current.Value
+            bb = ind["bb"]
+            upperBB = bb.UpperBand.Current.Value
+            middleBB = bb.MiddleBand.Current.Value
+            lowerBB = bb.LowerBand.Current.Value
+
+            # Define base position (trend-following component)
+            baseWeight = 0.35 if sma50 > sma200 else -0.35
+
+            # Adjust exposure based on momentum signals
+            bullishSignal = price > upperBB and rsi > 55
+            bearishSignal = price < lowerBB and rsi < 45
+
+            targetWeight = baseWeight
+            if bullishSignal and baseWeight > 0:
+                targetWeight = 0.75  # Increased from 0.5
+            elif bearishSignal and baseWeight < 0:
+                targetWeight = -0.75  # Increased from -0.5
+
+            # Scale back position if momentum weakens but allow more flexibility
+            if self.Portfolio[symbol].IsLong and (rsi >= 80 or price < middleBB):
+                targetWeight = 0.5  # Increased from 0.35
+            if self.Portfolio[symbol].IsShort and (rsi <= 20 or price > middleBB):
+                targetWeight = -0.5  # Increased from -0.35
+
+            # Ensure minimum absolute exposure is 25%
+            if abs(targetWeight) < 0.25:
+                targetWeight = 0.25 if baseWeight > 0 else -0.25
+
+            self.SetHoldings(symbol, targetWeight)
+
+            # Debugging output
+            self.Debug(f"{self.Time} {symbol.Value}: Price={price:.2f}, SMA50={sma50:.2f}, "
+                       f"SMA200={sma200:.2f}, RSI={rsi:.2f}, UpperBB={upperBB:.2f}, "
+                       f"MiddleBB={middleBB:.2f}, LowerBB={lowerBB:.2f}, Target Weight={targetWeight:.2f}")
