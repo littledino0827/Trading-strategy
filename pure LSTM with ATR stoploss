@@ -1,0 +1,129 @@
+from AlgorithmImports import *
+import numpy as np
+import pandas as pd
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.optimizers import Adam
+
+class LSTMTradingWithVolume(QCAlgorithm):
+
+    def Initialize(self):
+        self.SetStartDate(2018, 1, 1)
+        self.SetEndDate(2020, 1, 1)
+        self.SetCash(100000)
+        
+        self.symbol = self.AddEquity("SPY", Resolution.Daily).Symbol
+        
+        self.lookback = 60
+        self.train_interval = 20
+        
+        self.priceHistory = []
+        self.volumeHistory = []
+        self.model = None
+        self.days = 0
+
+        # Stop-loss related
+        self.atr = self.ATR(self.symbol, 14, MovingAverageType.Wilders, Resolution.Daily)
+        self.stopLossLevel = None
+        self.currentDirection = None
+
+    def OnData(self, data):
+        if not data.ContainsKey(self.symbol) or data[self.symbol] is None or not data[self.symbol].Price:
+            return
+
+        bar = data[self.symbol]
+        price = bar.Close
+        volume = bar.Volume
+
+        if not self.atr.IsReady:
+            return
+        
+        atr_value = self.atr.Current.Value
+
+        self.priceHistory.append(price)
+        self.volumeHistory.append(volume)
+        self.days += 1
+
+        # Clean up history
+        if len(self.priceHistory) > self.lookback + 100:
+            self.priceHistory = self.priceHistory[-(self.lookback + 100):]
+            self.volumeHistory = self.volumeHistory[-(self.lookback + 100):]
+
+        # Stop-loss check
+        if self.Portfolio[self.symbol].Invested and self.stopLossLevel is not None:
+            if self.currentDirection == "long" and price < self.stopLossLevel:
+                self.Liquidate(self.symbol)
+                self.Debug(f"Stop-loss triggered (long): Price={price:.2f}, Stop={self.stopLossLevel:.2f}")
+                self.stopLossLevel = None
+                self.currentDirection = None
+            elif self.currentDirection == "short" and price > self.stopLossLevel:
+                self.Liquidate(self.symbol)
+                self.Debug(f"Stop-loss triggered (short): Price={price:.2f}, Stop={self.stopLossLevel:.2f}")
+                self.stopLossLevel = None
+                self.currentDirection = None
+
+        if self.days % self.train_interval == 0 and len(self.priceHistory) > self.lookback + 10:
+            self.TrainModel()
+
+        if self.model is not None and len(self.priceHistory) >= self.lookback:
+            prices = np.array(self.priceHistory[-self.lookback:])
+            volumes = np.array(self.volumeHistory[-self.lookback:])
+
+            norm_prices = prices / prices[-1] - 1.0
+            norm_volumes = volumes / (np.mean(volumes) + 1e-9) - 1.0
+
+            features = np.stack((norm_prices, norm_volumes), axis=-1)
+            input_data = features.reshape((1, self.lookback, 2))
+
+            predicted_change = self.model.predict(input_data)[0][0]
+            predicted_price = price * (1 + predicted_change)
+
+            self.Debug(f"Day {self.days}: Price={price:.2f}, Predicted Price={predicted_price:.2f}, Change={predicted_change:.4f}")
+            
+            threshold = 0.001
+            atr_multiplier = 1.5
+
+            if predicted_price > price * (1 + threshold):
+                self.SetHoldings(self.symbol, 1.0)
+                self.stopLossLevel = price - atr_multiplier * atr_value
+                self.currentDirection = "long"
+                self.Debug(f"Entered long: Price={price:.2f}, Stop={self.stopLossLevel:.2f}")
+            elif predicted_price < price * (1 - threshold):
+                self.SetHoldings(self.symbol, -1.0)
+                self.stopLossLevel = price + atr_multiplier * atr_value
+                self.currentDirection = "short"
+                self.Debug(f"Entered short: Price={price:.2f}, Stop={self.stopLossLevel:.2f}")
+            else:
+                self.Liquidate(self.symbol)
+                self.stopLossLevel = None
+                self.currentDirection = None
+
+    def TrainModel(self):
+        prices = np.array(self.priceHistory)
+        volumes = np.array(self.volumeHistory)
+
+        X, y = [], []
+        for i in range(len(prices) - self.lookback - 1):
+            price_seq = prices[i:i+self.lookback]
+            volume_seq = volumes[i:i+self.lookback]
+
+            norm_price = price_seq / price_seq[-1] - 1.0
+            norm_volume = volume_seq / (np.mean(volume_seq) + 1e-9) - 1.0
+
+            features = np.stack((norm_price, norm_volume), axis=-1)
+            X.append(features)
+
+            target = (prices[i+self.lookback] / prices[i+self.lookback - 1]) - 1
+            y.append(target)
+
+        X = np.array(X)
+        y = np.array(y)
+
+        model = Sequential()
+        model.add(LSTM(50, input_shape=(self.lookback, 2)))
+        model.add(Dense(1))
+        model.compile(optimizer=Adam(learning_rate=0.001), loss='mse')
+
+        model.fit(X, y, epochs=10, batch_size=16, verbose=0)
+        self.model = model
+        self.Debug(f"Model retrained at day {self.days}")
