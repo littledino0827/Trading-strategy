@@ -1,0 +1,54 @@
+from AlgorithmImports import *
+
+class MACDHistogramBreakoutHourly(QCAlgorithm):
+
+    def Initialize(self):
+        self.SetStartDate(2020, 1, 1)
+        self.SetEndDate(2021, 1, 1)
+        self.SetCash(100000)
+
+        self.symbol = self.AddEquity("AAPL", Resolution.Hour).Symbol
+
+        # MACD on hourly data
+        self.macd = self.MACD(self.symbol, 12, 26, 9, MovingAverageType.Exponential, Resolution.Hour)
+
+        # FIX: Properly initialize RollingWindow with 10 bars
+        self.hist_window = RollingWindow[float](10)
+
+    def OnData(self, data):
+        if not self.macd.IsReady:
+            return
+
+        # Calculate MACD histogram
+        hist = self.macd.Current.Value - self.macd.Signal.Current.Value
+
+        # Update the rolling window
+        self.hist_window.Add(hist)
+
+        if self.hist_window.Count < self.hist_window.Size:
+            return
+
+        # Compute average of absolute histogram values
+        hist_avg = sum(abs(x) for x in self.hist_window) / self.hist_window.Count
+
+        # Logic variables
+        macd_line = self.macd.Current.Value
+        signal_line = self.macd.Signal.Current.Value
+        price = self.Securities[self.symbol].Price
+        invested = self.Portfolio[self.symbol].Invested
+
+        # Buy logic
+        if (not invested
+            and macd_line > signal_line
+            and hist > hist_avg
+            and self.hist_window[1] <= hist_avg):
+            self.SetHoldings(self.symbol, 1)
+            self.Debug(f"[BUY] {self.Time} | Price: {price:.2f} | Hist: {hist:.4f} > Avg: {hist_avg:.4f}")
+
+        # Sell logic
+        elif (invested
+              and macd_line < signal_line
+              and hist < hist_avg
+              and self.hist_window[1] >= hist_avg):
+            self.Liquidate(self.symbol)
+            self.Debug(f"[SELL] {self.Time} | Price: {price:.2f} | Hist: {hist:.4f} < Avg: {hist_avg:.4f}")
