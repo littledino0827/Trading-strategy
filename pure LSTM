@@ -1,0 +1,83 @@
+from AlgorithmImports import *
+import numpy as np
+import pandas as pd
+import math
+
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+
+
+class MomentumVolumeTrendStrategy(QCAlgorithm):
+    
+    def Initialize(self):
+        self.SetStartDate(2019, 1, 1)
+        self.SetEndDate(2020, 1, 1)
+        self.SetCash(1000000)
+
+        # Add single stock
+        self.symbol = self.AddEquity("GOOG", Resolution.Daily).Symbol
+
+        # Warm-up period for indicators
+        self.SetWarmUp(500)
+
+        # Initialize LSTM model
+        self.model = self.build_lstm_model()
+
+    def OnData(self, data):
+        if self.IsWarmingUp or not data.ContainsKey(self.symbol) or data[self.symbol] is None:
+            return
+
+        # 1. Get historical data
+        history = self.History(self.symbol, 250, Resolution.Daily)
+        if history.empty or len(history) < 250:
+            return
+
+        df = history.reset_index()
+        df['logclose'] = np.log(df['close']) - np.log(df['close'].iloc[0])
+
+        # 2. Feature engineering
+        features = ['logclose', 'close', 'volume']
+        df = df[features]
+        scaled = MinMaxScaler(feature_range=(0, 1)).fit_transform(df.values)
+
+        # 3. Reshape for LSTM
+        if scaled.shape != (250, 3):
+            return
+        X = scaled.reshape(1, 250, 3)
+
+        # 4. Predict
+        prediction = self.model.predict(X, verbose=0)
+        predicted_return = prediction[0][0]
+        predicted_risk = prediction[0][1]
+
+        # 5. Act only if confidence is high
+        confidence_threshold = 0.002
+        direction = 0
+        if predicted_return > confidence_threshold:
+            direction = 1
+        elif predicted_return < -confidence_threshold:
+            direction = -1
+
+        self.SetHoldings(self.symbol, direction)
+
+        # 6. Debug info
+        price = data[self.symbol].Price
+        self.Debug(f"{self.Time} {self.symbol.Value}: "
+                   f"Price={price:.2f}, PredReturn={predicted_return:.4f}, "
+                   f"Risk={predicted_risk:.4f}, Direction={direction}")
+
+    def build_lstm_model(self):
+        # Create and return LSTM model
+        model = Sequential()
+        model.add(LSTM(40, return_sequences=True, input_shape=(250, 3)))
+        model.add(Dropout(0.2))
+        model.add(LSTM(40))
+        model.add(Dropout(0.2))
+        model.add(Dense(2))  # Output: [predicted_return, predicted_risk]
+        model.compile(optimizer='adam', loss='mean_squared_error')
+        return model
+
+    def OnEndOfDay(self):
+        # Optional: Save the model
+        self.model.save(f"{self.symbol.Value}_lstm_model.h5")
