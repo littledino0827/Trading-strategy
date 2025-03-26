@@ -1,0 +1,52 @@
+# region imports
+from AlgorithmImports import *
+import tensorflow as tf
+from transformers import TFBertForSequenceClassification, BertTokenizer
+# endregion
+
+class FinBERTStrategy(QCAlgorithm):
+
+    current_holdings = 0
+    target_holdings = 0
+
+    def initialize(self) -> None:
+        self.set_start_date(2023, 5, 17)
+        self.set_end_date(2023, 5, 20)
+
+        self.aapl = self.add_equity("AAPL", Resolution.MINUTE).symbol
+        self.tiingo_symbol = self.add_data(TiingoNews, self.aapl).symbol
+
+        self.model_name = "ProsusAI/finbert"
+        self.tokenizer = BertTokenizer.from_pretrained(self.model_name)
+        self.model = TFBertForSequenceClassification.from_pretrained(self.model_name, from_pt = True)
+
+    def on_data(self, slice: Slice) -> None:
+        # Fetch Tiingo data and assign sentiment score
+        if slice.contains_key(self.tiingo_symbol):
+            # Fetch data
+            title_words = slice[self.tiingo_symbol].description.lower()
+            
+            # Convert to FinBERT format and process with FinBERT
+            inputs = self.tokenizer(title_words, return_tensors="tf")
+            outputs = self.model(**inputs)
+
+            # Determine sentiment of article
+            logits = outputs.logits
+            probabilities = tf.nn.softmax(logits, axis=-1)
+            predicted_labels = tf.argmax(probabilities, axis=-1)
+
+            score = -1 * (predicted_labels.numpy()[0] - 1)
+
+            # Adjust holdings        
+            if score > 0:
+                self.target_holdings = 1
+                
+            elif score < 0:
+                self.target_holdings = -1
+            
+        # Buy or short sell if the sentiment has changed from our current holdings
+        if slice.contains_key(self.aapl) and self.current_holdings != self.target_holdings:
+            self.set_holdings(self.aapl, self.target_holdings)
+            self.current_holdings = self.target_holdings
+
+        return
