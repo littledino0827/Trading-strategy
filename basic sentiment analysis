@@ -1,0 +1,45 @@
+from AlgorithmImports import *
+from QuantConnect.DataSource import *
+
+# Source: https://www.quantconnect.com/docs/v2/writing-algorithms/datasets/tiingo/tiingo-news-feed
+
+class TiingoNewsDataAlgorithm(QCAlgorithm):
+
+    current_holdings = 0
+    target_holdings = 0
+    word_scores = {'good': 1, 'great': 1, 'best': 1, 'growth': 1,
+                   'bad': -1, 'terrible': -1, 'worst': -1, 'loss': -1}
+
+    def initialize(self) -> None:
+        self.set_start_date(2023, 5, 17)
+        self.set_end_date(2023, 5, 20)
+        self.set_cash(100000)
+        
+        # Requesting data
+        self.aapl = self.add_equity("AAPL", Resolution.MINUTE).symbol
+        self.tiingo_symbol = self.add_data(TiingoNews, self.aapl).symbol
+        
+        # Historical data
+        history = self.history(self.tiingo_symbol, 14, Resolution.DAILY)
+        self.debug(f"We got {len(history)} items from our history request")
+        
+        
+    def on_data(self, slice: Slice) -> None:
+        if slice.contains_key(self.tiingo_symbol):
+            # Assign a sentiment score to the news article
+            title_words = slice[self.tiingo_symbol].description.lower()
+            score = 0
+            for word, word_score in self.word_scores.items():
+                if word in title_words:
+                    score += word_score
+                    
+            if score > 0:
+                self.target_holdings = 1
+                
+            elif score < 0:
+                self.target_holdings = -1
+        
+        # Buy or short sell if the sentiment has changed from our current holdings
+        if slice.contains_key(self.aapl) and self.current_holdings != self.target_holdings:
+            self.set_holdings(self.aapl, self.target_holdings)
+            self.current_holdings = self.target_holdings
